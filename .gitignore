@@ -217,3 +217,10 @@ __marimo__/
 
 # Cache
 **/data_cache/
+
+# Local run output (results, cache, memory log) — see .env
+/output/*
+!/output/.gitkeep
+
+# Local scratch script with a hardcoded API key — never commit
+/test_mono.py

@@ -1,8 +1,16 @@
 import os
+import requests
 from typing import Any, Optional
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import (
+    HumanMessage,
+    AIMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from .base_client import BaseLLMClient, normalize_content
 from .validators import validate_model
@@ -116,9 +124,144 @@ _PROVIDER_CONFIG = {
     "qwen": ("https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY"),
     "glm": ("https://api.z.ai/api/paas/v4/", "ZHIPU_API_KEY"),
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
+    "monorouter": ("https://monogpt.kr/api/monorouter/v1/openai/v1", "MONOROUTER_API_KEY"),
     "ollama": ("http://localhost:11434/v1", None),
 }
 
+class MonoRouterChatOpenAI(NormalizedChatOpenAI):
+    """MonoRouter client using raw requests to avoid OpenAI SDK incompatibility."""
+
+    def _convert_message(self, message):
+        if isinstance(message, HumanMessage):
+            return {
+                "role": "user",
+                "content": str(message.content),
+            }
+
+        elif isinstance(message, SystemMessage):
+            return {
+                "role": "system",
+                "content": str(message.content),
+            }
+
+        elif isinstance(message, ToolMessage):
+            return {
+                "role": "tool",
+                "tool_call_id": message.tool_call_id,
+                "content": str(message.content),
+            }
+
+        elif isinstance(message, AIMessage):
+
+            payload = {
+                "role": "assistant",
+                "content": (
+                    str(message.content)
+                    if message.content is not None
+                    else ""
+                ),
+            }
+
+            tool_calls = message.additional_kwargs.get("tool_calls")
+
+            if tool_calls:
+                payload["tool_calls"] = tool_calls
+
+            return payload
+
+        else:
+            return {
+                "role": "user",
+                "content": str(message.content),
+            }   
+
+
+
+
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        print("MONOROUTER _generate CALLED")
+        api_key = os.environ.get("MONOROUTER_API_KEY")
+        if not api_key:
+            raise ValueError("MONOROUTER_API_KEY is not set.")
+
+        base_url = str(self.openai_api_base or "https://monogpt.kr/api/monorouter/v1/openai/v1")
+        url = base_url.rstrip("/") + "/chat/completions"
+
+        payload = {
+            "model": self.model_name,
+            "messages": [self._convert_message(m) for m in messages],
+            "max_completion_tokens": 2500,
+        }
+
+        # Optional fields
+        if stop:
+            payload["stop"] = stop
+
+        if "temperature" in kwargs and kwargs["temperature"] is not None:
+            payload["temperature"] = kwargs["temperature"]
+
+        # Keep tools if later agents use function/tool calling
+        if "tools" in kwargs:
+            payload["tools"] = kwargs["tools"]
+
+        if "tool_choice" in kwargs:
+            payload["tool_choice"] = kwargs["tool_choice"]
+
+        res = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=120,
+        )
+
+        if res.status_code >= 400:
+            raise RuntimeError(f"MonoRouter error {res.status_code}: {res.text}")
+
+        data = res.json()
+
+        choice = data["choices"][0]
+        message = choice.get("message", {})
+
+        choice = data["choices"][0]
+        message = choice.get("message", {})
+
+        content = message.get("content") or ""
+
+        additional_kwargs = {}
+
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            additional_kwargs["tool_calls"] = tool_calls
+
+        reasoning_content = message.get("reasoning_content")
+        if reasoning_content:
+            additional_kwargs["reasoning_content"] = reasoning_content
+
+        refusal = message.get("refusal")
+        if refusal is not None:
+            additional_kwargs["refusal"] = refusal
+
+        if not content and not tool_calls:
+            raise RuntimeError(f"MonoRouter returned empty content without tool calls: {data}")
+
+        return ChatResult(
+            generations=[
+                ChatGeneration(
+                    message=AIMessage(
+                        content=content,
+                        additional_kwargs=additional_kwargs,
+                        response_metadata={
+                            "finish_reason": choice.get("finish_reason"),
+                            "model_name": self.model_name,
+                        },
+                    )
+                )
+            ]
+        )
 
 class OpenAIClient(BaseLLMClient):
     """Client for OpenAI, Ollama, OpenRouter, and xAI providers.
@@ -171,7 +314,13 @@ class OpenAIClient(BaseLLMClient):
 
         # DeepSeek's thinking-mode quirks live in their own subclass so the
         # base NormalizedChatOpenAI stays free of provider-specific branches.
-        chat_cls = DeepSeekChatOpenAI if self.provider == "deepseek" else NormalizedChatOpenAI
+        if self.provider == "monorouter":
+            chat_cls = MonoRouterChatOpenAI
+        elif self.provider == "deepseek":
+            chat_cls = DeepSeekChatOpenAI
+        else:
+            chat_cls = NormalizedChatOpenAI
+
         return chat_cls(**llm_kwargs)
 
     def validate_model(self) -> bool:

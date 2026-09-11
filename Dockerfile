@@ -8,6 +8,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /build
 COPY . .
+
 RUN pip install --no-cache-dir .
 
 FROM python:3.12-slim
@@ -16,7 +17,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONPATH="/home/appuser/app"
 
 RUN useradd --create-home appuser
 USER appuser

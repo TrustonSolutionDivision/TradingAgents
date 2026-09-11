@@ -11,5 +11,6 @@ build
 dist
 results
 eval_results
+output
 Dockerfile
 docker-compose.yml
